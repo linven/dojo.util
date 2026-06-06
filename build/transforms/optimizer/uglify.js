@@ -1,4 +1,9 @@
 /*jshint node:true */
+/*
+ * uglify.js - Modified to support terser (async) as the minification backend.
+ * The worker (uglify_worker.js) now returns Promises instead of sync strings.
+ * Only the non-subprocess path was changed to handle async results.
+ */
 define([
 	"../../buildControl",
 	"../../fs",
@@ -79,14 +84,13 @@ define([
 			});
 			currentIndex = (currentIndex+1) % processes.length;
 		} else {
+			// Modified: terser.minify() is async (returns Promise), handle accordingly
 			process.nextTick(function(){
-				var o = {};
-				try{
-					o.text = uglify(stripConsole(text), options, resource.dest, bc.useSourceMaps);
-				}catch(e){
-					o.error = e;
-				}
-				handleResult(o);
+				uglify(stripConsole(text), options, resource.dest, bc.useSourceMaps).then(function(result){
+					handleResult({text: result});
+				}).catch(function(e){
+					handleResult({error: e});
+				});
 			});
 		}
 

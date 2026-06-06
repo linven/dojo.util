@@ -1,67 +1,71 @@
-function factory(uglify, fs){
-	if(!uglify){
+/*
+ * uglify_worker.js - Modified to use terser instead of uglify-js 2.x
+ *
+ * terser supports ES6+ syntax (let, const, arrow functions, template literals,
+ * destructuring, classes, async/await, etc.) while uglify-js 2.x only supports ES5.
+ *
+ * The interface is preserved: the main uglify.js optimizer module calls this worker
+ * the same way. The function signature remains:
+ *   minify(code, options, dest, useSourceMaps) -> Promise<string>
+ */
+function factory(terser, fs){
+	if(!terser){
 		throw new Error("Unknown host environment: only nodejs is supported by uglify optimizer.");
 	}
-	if(uglify.minify){
-		//uglify2, provide a uglify-1 compatible uglify function
-		var UglifyJS = uglify;
-		uglify = function(code, options, dest, useSourceMaps){
-			//parse
-			var ast = UglifyJS.parse(code, options);
-			ast.figure_out_scope();
 
-			//by default suppress warnings from uglify2
-			var compress_options = options.compress_options || {};
-			if(!('warnings' in compress_options)){
-				compress_options.warnings = false;
+	// Wrap terser.minify() into the uglify-compatible interface expected by uglify.js
+	// Original interface: function(code, options, dest, useSourceMaps) -> string
+	// New: returns a Promise<string> (terser 5.x is async-only)
+	function minifyWithTerser(code, options, dest, useSourceMaps){
+		var terserOptions = {
+			compress: options.compress_options || {
+				warnings: false
+			},
+			mangle: true,
+			output: options.gen_options || {}
+		};
+
+		if(options.filename){
+			terserOptions.sourceMap = useSourceMaps ? {
+				filename: options.filename.split("/").pop(),
+				url: dest.split("/").pop() + ".map"
+			} : false;
+		}
+
+		// terser 5.x minify returns a Promise
+		return terser.minify(code, terserOptions).then(function(result){
+			if(result.error){
+				throw result.error;
 			}
-			var compressor = UglifyJS.Compressor(compress_options);
-			compressed_ast = ast.transform(compressor);
-			compressed_ast.figure_out_scope();
+			var output = result.code;
 
-			//mangle
-			compressed_ast.compute_char_frequency();
-			compressed_ast.mangle_names();
-
-			var gen_options = options.gen_options || {};
-			if (useSourceMaps) {
-				var source_map = gen_options.source_map || {};
-				source_map.file = options.filename.split("/").pop();
-				// account for the //>> built line
-				source_map.dest_line_diff = 1;
-				gen_options.source_map = UglifyJS.SourceMap(source_map);
-			}
-
-			var output = compressed_ast.print_to_string(gen_options);
-
-			if (useSourceMaps) {
-				output += "//# sourceMappingURL=" + dest.split("/").pop() + ".map";
-				fs.writeFile(dest + ".map", gen_options.source_map.toString(), "utf-8", function() {});
+			if(useSourceMaps && result.map){
+				fs.writeFile(dest + ".map", result.map, "utf-8", function(){});
 			}
 
 			return output;
-		}
+		});
 	}
-	return uglify;
+
+	return minifyWithTerser;
 }
 
 if(global.define){
-	//loaded by dojo AMD loader
-	define(["dojo/has!host-node?dojo/node!uglify-js:", "../../fs"], factory);
+	//loaded by dojo AMD loader - use terser instead of uglify-js
+	define(["dojo/has!host-node?dojo/node!terser:", "../../fs"], factory);
 }else{
 	//loaded in a node sub process
 	try{
-		var uglify = require("uglify-js");
+		var terser = require("terser");
 		var fs = require("fs");
 	}catch(e){}
-	uglify = factory(uglify, fs);
+	var minifyFn = factory(terser, fs);
 	process.on("message", function(data){
 		var result = "", error = "";
-		try{
-			var result = uglify(data.text, data.options, data.dest, data.useSourceMaps);
-		}catch(e){
-			error = e.toString() + " " + e.stack;
-		}
-		process.send({text: result, dest: data.dest, error: error});
+		minifyFn(data.text, data.options, data.dest, data.useSourceMaps).then(function(output){
+			process.send({text: output, dest: data.dest, error: ""});
+		}).catch(function(e){
+			process.send({text: "", dest: data.dest, error: e.toString() + " " + (e.stack || "")});
+		});
 	});
 }
